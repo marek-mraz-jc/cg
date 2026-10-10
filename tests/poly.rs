@@ -144,3 +144,19 @@ fn graph_dir_is_git_ignored() {
     let ignore = std::path::Path::new(db()).join(".gitignore");
     assert_eq!(std::fs::read_to_string(ignore).unwrap(), "*\n");
 }
+
+#[test]
+fn cfg_of_enclosing_modules_is_inherited() {
+    let out = q("MATCH (s:Symbol) WHERE s.name IN ['creates', 'create_entity'] AND s.lang = 'rust' RETURN s.name, s.cfg, s.features ORDER BY s.name");
+    assert!(out.contains("create_entity |  | \n"), "{out}");
+    assert!(out.contains("creates | test | \n"), "{out}");
+}
+
+#[test]
+fn every_schema_example_runs() {
+    let schema = cg(&["schema", "--db", db()]);
+    let stmts: Vec<&str> = schema.lines().filter(|l| ["MATCH ", "RETURN ", "SHOW ", "GREP "].iter().any(|k| l.starts_with(k))).collect();
+    assert!(stmts.len() > 15, "{schema}");
+    let out = cg(&["q", "--db", db(), "-e", &stmts.join("\n")]);
+    assert!(!out.contains("ERROR"), "{out}");
+}

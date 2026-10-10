@@ -16,6 +16,8 @@ Conventions
   impl's path reads `crate::<Type as Trait>::method`; trait_name / self_type hold the parts.
 - kind: Function Method StaticMethod TraitMethod Constructor Macro Struct Enum EnumMember Field Trait Class
   Interface TypeAlias Constant Module Impl; external=true marks dependency/std symbols (no file, no outgoing edges).
+  Dependencies named in `cg build --deps a,b` (or `deps = [...]` in .cg/config.toml) are indexed too: their
+  symbols have external=false, a file under ~/.cache/cg/deps, and Package.workspace=false for their package.
 - CALLS = a callable used inside a callable body (calls, fn pointers, JSX components, macro invocations).
   Dynamic dispatch lands on the trait/interface method; static calls (`Trait::m(&x)`, concrete receivers)
   land on the impl method. All callers of a trait method: (c)-[:CALLS]->()-[:IMPLEMENTS*0..1]->(t).
@@ -31,6 +33,10 @@ Conventions
   so [:CALLS|LINKS_TO*1..6] follows a request across languages. Channel.providers / users count endpoints.
 - Channel keys are normalised: path params of any framework become {}, HTTP keys read \"VERB /path\".
 - is_test: test files, test functions, everything inside cfg(test) modules / test classes.
+- cfg: the #[cfg(...)] conditions of the item and every enclosing module, joined by \" && \" (Rust).
+  features: cargo features those conditions require, comma-separated (`feature = \"x\"` and all(...) conjuncts;
+  not(...)/any(...) require none). '' = compiled in every build. Crate-level gating (optional crates,
+  required-features, #![cfg] at a file top) is not in it: check Cargo.toml.
   cc = approximate branch count. Bound variable-length paths; output stops at --max-rows rows.
 Blind spots: the graph has no edge for these, so check with GREP before answering \"none\" or \"all\"
 - `.method()` calls inside a macro_rules! body; derived impls (#[derive]) have no source or callers.
@@ -38,7 +44,14 @@ Blind spots: the graph has no edge for these, so check with GREP before answerin
 - routes / subjects built at run time, unless the project pins them in .cg/links ([[endpoint]]).
 - files no indexer covers (YAML, SQL, shell, Markdown) have File nodes only via link rules: GREP searches them.
 Every truncation, skipped file and stale file is printed; a result without such a line is complete for what
-the graph models.";
+the graph models.
+Workflow
+- Use the graph for relations (who calls / implements / reaches / serves what, what a change touches); it
+  answers in milliseconds where reading would take many files. Then read the code you will change (SHOW, or
+  open the file): the graph says where to look, not what the code does.
+- Ask everything a step needs in ONE call: several -e, or `cg q - <<'EOF'` with one statement per line.
+- `cg build --reuse` is safe: an index whose sources changed since it was written is rebuilt. STALE in the
+  header lists files edited since the build; rebuild before trusting answers about them.";
 
 pub const EXAMPLES: &str = "\
 Examples (one `cg q` call runs them all; each statement ends with ';' at the end of a line)
@@ -74,7 +87,14 @@ MATCH (t:Symbol {name:'MemStore'})-[:HAS_METHOD]->(m) RETURN m.name, m.signature
 MATCH (f:File)-[:DEFINES]->(s:Symbol) WHERE s.kind IN ['Function','Method'] AND NOT s.is_test
 RETURN s.path, s.cc, s.loc, f.commits_1y ORDER BY s.cc DESC LIMIT 10;
 // package dependencies inside the workspace
-MATCH (a:Package {workspace:true})-[d:DEPENDS_ON]->(b:Package {workspace:true}) RETURN a.name, d.kind, b.name;";
+MATCH (a:Package {workspace:true})-[d:DEPENDS_ON]->(b:Package {workspace:true}) RETURN a.name, d.kind, b.name;
+// what a cargo feature adds, and feature-only code that reaches a given crate (layering check)
+MATCH (s:Symbol) WHERE s.features CONTAINS 'odata' AND NOT s.is_test RETURN s.kind, count(*);
+MATCH (s:Symbol)-[:CALLS*1..3]->(x:Symbol) WHERE s.features <> '' AND x.package = 'antares-store' RETURN DISTINCT s.path, s.features LIMIT 20;
+// invariant as a query that must return no rows: route handlers that never reach the policy gate
+MATCH (h:Symbol)-[:PROVIDES]->(c:Channel {channel:'http'}) WHERE NOT EXISTS { MATCH (h)-[:CALLS|DISPATCHES*1..6]->(g:Symbol {name:'gate'}) } RETURN c.key, h.path;
+// inside a dependency indexed with --deps: what our code reaches in it
+MATCH (c:Symbol)-[:CALLS]->(f:Symbol {package:'serde_json'})-[:CALLS*1..2]->(g:Symbol {package:'serde_json'}) WHERE NOT c.is_test AND NOT f.external RETURN f.path, count(DISTINCT g) ORDER BY count(DISTINCT g) DESC LIMIT 10;";
 
 pub fn db_file(db: &Path) -> PathBuf {
     if db.is_dir() { db.join("graph.lbug") } else { db.to_path_buf() }

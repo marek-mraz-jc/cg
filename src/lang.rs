@@ -60,6 +60,21 @@ impl Lang {
         }
     }
 
+    /// Files whose edit makes this language's SCIP index stale: sources and the manifests that
+    /// decide how they resolve.
+    pub fn is_index_input(self, path: &str) -> bool {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        let ext = base.rsplit_once('.').map_or("", |(_, e)| e);
+        match self {
+            Lang::Rust => ext == "rs" || matches!(base, "Cargo.toml" | "Cargo.lock"),
+            Lang::Typescript => {
+                matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts")
+                    || matches!(base, "package.json" | "tsconfig.json")
+            }
+            Lang::Python => ext == "py" || matches!(base, "pyproject.toml" | "setup.py" | "setup.cfg"),
+        }
+    }
+
     pub fn is_test_file(self, path: &str) -> bool {
         let p = format!("/{path}");
         let base = path.rsplit('/').next().unwrap_or(path);
@@ -354,6 +369,39 @@ pub fn is_cfg_test(attrs: &str) -> bool {
     CFG_ATTR.captures_iter(attrs).any(|c| TEST_WORD.is_match(&NOT_TEST.replace_all(&c[1], "")))
 }
 
+/// The conditions of every `#[cfg(...)]` in `attrs`, as written.
+pub fn cfg_conditions(attrs: &str) -> Vec<String> {
+    CFG_ATTR.captures_iter(attrs).map(|c| c[1].trim().to_string()).collect()
+}
+
+static FEATURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^feature\s*=\s*"([^"]+)"$"#).unwrap());
+
+/// Cargo features a cfg condition requires: `feature = "x"` and the conjuncts of `all(...)`.
+/// `any(...)` and `not(...)` require none of theirs (the item may build without each).
+pub fn required_features(cond: &str) -> Vec<String> {
+    let cond = cond.trim();
+    if let Some(c) = FEATURE.captures(cond) {
+        return vec![c[1].to_string()];
+    }
+    let Some(inner) = cond.strip_prefix("all(").and_then(|r| r.strip_suffix(')')) else {
+        return Vec::new();
+    };
+    let (mut parts, mut depth, mut start) = (Vec::new(), 0i32, 0);
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&inner[start..]);
+    parts.into_iter().flat_map(required_features).collect()
+}
+
 /// `#[...]` attributes / `@decorator` lines directly above a definition (comments skipped).
 pub fn leading_attrs(lines: &[&str], line: usize) -> String {
     let mut out = Vec::new();
@@ -549,6 +597,25 @@ mod tests {
         assert!(is_cfg_test("#[allow(x)] #[cfg(all(test, not(target_arch = \"wasm32\")))]"));
         assert!(!is_cfg_test("#[cfg(not(test))]"));
         assert!(!is_cfg_test("#[cfg(feature = \"testing\")]"));
+    }
+
+    #[test]
+    fn cfg_features_required_only_by_conjunction() {
+        let attrs = r#"#[allow(x)] #[cfg(feature = "odata")] #[cfg(all(feature = "views", not(feature = "x"), any(feature = "a", test)))]"#;
+        assert_eq!(cfg_conditions(attrs), [r#"feature = "odata""#, r#"all(feature = "views", not(feature = "x"), any(feature = "a", test))"#]);
+        let req: Vec<String> = cfg_conditions(attrs).iter().flat_map(|c| required_features(c)).collect();
+        assert_eq!(req, ["odata", "views"]);
+        assert!(required_features(r#"not(feature = "odata")"#).is_empty());
+        assert!(required_features(r#"any(feature = "a", feature = "b")"#).is_empty());
+        assert!(required_features("").is_empty());
+    }
+
+    #[test]
+    fn index_inputs_per_language() {
+        assert!(Lang::Rust.is_index_input("crates/a/src/lib.rs") && Lang::Rust.is_index_input("Cargo.lock"));
+        assert!(!Lang::Rust.is_index_input("docs/a.md") && !Lang::Rust.is_index_input("src/app.ts"));
+        assert!(Lang::Typescript.is_index_input("www/src/App.tsx") && Lang::Typescript.is_index_input("package.json"));
+        assert!(Lang::Python.is_index_input("worker/app.py") && !Lang::Python.is_index_input("worker/app.pyc"));
     }
 
     #[test]

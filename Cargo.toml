@@ -1,6 +1,6 @@
 [package]
 name = "cg"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Cypher-queryable code graph from SCIP indexes (Rust, TypeScript, Python) with per-project service links"
 license = "MIT"

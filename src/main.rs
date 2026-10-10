@@ -27,9 +27,13 @@ enum Cmd {
         repo: PathBuf,
         #[arg(long)]
         db: Option<PathBuf>,
-        /// reuse SCIP files from the previous build instead of re-running indexers
+        /// reuse SCIP files from the previous build; an index whose sources changed since is rebuilt
         #[arg(long)]
         reuse: bool,
+        /// Rust dependencies to index into the graph too (comma-separated crate names; also `deps`
+        /// in .cg/config.toml); cached per version in ~/.cache/cg/deps
+        #[arg(long, value_delimiter = ',')]
+        deps: Vec<String>,
     },
     /// Node/relationship tables with counts, conventions and example queries
     Schema {
@@ -78,11 +82,11 @@ fn project_root() -> PathBuf {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Build { repo, db, reuse } => {
+        Cmd::Build { repo, db, reuse, deps } => {
             let repo = repo.canonicalize().with_context(|| format!("repo {}", repo.display()))?;
             let db = resolve_db(db, &repo)?;
             let db = if db.is_absolute() { db } else { std::env::current_dir()?.join(db) };
-            build::build(&build::Opts { repo, db, reuse })
+            build::build(&build::Opts { repo, db, reuse, deps })
         }
         Cmd::Schema { db } => query::schema(&resolve_db(db, &project_root())?),
         Cmd::Q { db, e, file, max_rows, timeout } => {

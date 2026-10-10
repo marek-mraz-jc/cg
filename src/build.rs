@@ -19,7 +19,7 @@ pub const SCHEMA: &[&str] = &[
     "CREATE NODE TABLE Symbol(id STRING PRIMARY KEY, name STRING, path STRING, kind STRING, lang STRING, \
      package STRING, external BOOLEAN, file STRING, line INT64, end_line INT64, loc INT64, visibility STRING, \
      is_async BOOLEAN, is_unsafe BOOLEAN, is_test BOOLEAN, trait_name STRING, self_type STRING, \
-     signature STRING, attrs STRING, doc STRING, cc INT64)",
+     signature STRING, attrs STRING, doc STRING, cc INT64, cfg STRING, features STRING)",
     "CREATE NODE TABLE Channel(id STRING PRIMARY KEY, channel STRING, key STRING, providers INT64, users INT64)",
     "CREATE REL TABLE DEPENDS_ON(FROM Package TO Package, kind STRING)",
     "CREATE REL TABLE CONTAINS(FROM Package TO File, FROM Symbol TO Symbol)",
@@ -43,6 +43,9 @@ pub struct Config {
     pub db: Option<String>,
     #[serde(default)]
     pub index: Vec<IndexSpec>,
+    /// Rust dependencies indexed into the graph too (crate names as in Cargo.lock)
+    #[serde(default)]
+    pub deps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +61,9 @@ pub struct IndexSpec {
     pub scip: Option<String>,
     /// project name for scip-python (default: root directory name)
     pub name: Option<String>,
+    /// a dependency's cached index (`deps`): no package rows, no link rules
+    #[serde(skip)]
+    pub dep: bool,
 }
 
 fn dot() -> String {
@@ -91,7 +97,7 @@ pub fn detect_indexes(repo: &Path) -> Vec<IndexSpec> {
             (Lang::Python, has("pyproject.toml") || has("setup.py")),
         ] {
             if found && !covered(&out, l) {
-                out.push(IndexSpec { lang: l, root: rel.clone(), cmd: None, scip: None, name: None });
+                out.push(IndexSpec { lang: l, root: rel.clone(), cmd: None, scip: None, name: None, dep: false });
             }
         }
         if depth < 2 {
@@ -143,6 +149,10 @@ struct Sym {
     attrs: String,
     doc: String,
     cc: i64,
+    /// `#[cfg(...)]` conditions of the item and every enclosing module, joined by " && "
+    cfg: String,
+    /// cargo features those conditions require (sorted, comma-separated)
+    features: String,
     span: i32,
     descs: Vec<scip::Desc>,
     imp: Option<lang::ImplBlock>,
@@ -262,15 +272,27 @@ pub struct Opts {
     pub db: PathBuf,
     /// reuse SCIP files from a previous build instead of re-running indexers
     pub reuse: bool,
+    /// Rust dependencies to index as well, on top of `deps` in .cg/config.toml
+    pub deps: Vec<String>,
 }
 
 pub fn build(opts: &Opts) -> Result<()> {
     let t0 = Instant::now();
     let repo = opts.repo.canonicalize().with_context(|| format!("repo {}", opts.repo.display()))?;
     let cfg = load_config(&repo)?;
-    let specs = if cfg.index.is_empty() { detect_indexes(&repo) } else { cfg.index.clone() };
+    let mut specs = if cfg.index.is_empty() { detect_indexes(&repo) } else { cfg.index.clone() };
     if specs.is_empty() {
         bail!("no Cargo.toml / package.json / pyproject.toml found; add [[index]] entries to .cg/config.toml");
+    }
+    let mut want: Vec<String> = cfg.deps.iter().chain(&opts.deps).cloned().collect();
+    want.sort();
+    want.dedup();
+    if !want.is_empty() {
+        let rust_root = specs.iter().find(|s| s.lang == Lang::Rust && !s.dep).map(|s| repo.join(&s.root));
+        match rust_root {
+            Some(root) => specs.extend(dep_specs(&root, &want)?),
+            None => eprintln!("warning: deps {want:?} named but no Rust index to resolve them from"),
+        }
     }
     let links = Links::load_dir(&repo.join(".cg/links"))?;
     std::fs::create_dir_all(opts.db.join("scip"))?;
@@ -292,7 +314,7 @@ pub fn build(opts: &Opts) -> Result<()> {
     }
 
     let mut g = Graph::default();
-    for (spec, _) in &indexes {
+    for (spec, _) in indexes.iter().filter(|(s, _)| !s.dep) {
         if let Err(e) = load_packages(&repo, spec, &mut g) {
             eprintln!("warning: packages of {} ({}): {e:#}", spec.root, spec.lang.name());
         }
@@ -389,10 +411,16 @@ fn run_indexer(repo: &Path, db: &Path, spec: &IndexSpec, reuse: bool) -> Result<
     }
     let tag: String = spec.root.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     let out = db.join("scip").join(format!("{}-{tag}.scip", spec.lang.name()));
-    if reuse && out.is_file() {
-        return Ok(out);
-    }
     let root = repo.join(&spec.root);
+    if reuse && out.is_file() {
+        // a SCIP older than the sources gives every row wrong lines (attrs, test flags, spans)
+        let newer = newer_inputs(&root, spec.lang, &out);
+        if newer.is_empty() {
+            return Ok(out);
+        }
+        println!("  {} index ({}): {} files changed since its SCIP (e.g. {}), re-indexing",
+                 spec.lang.name(), spec.root, newer.len(), newer[0]);
+    }
     let name = spec.name.clone().unwrap_or_else(|| {
         root.file_name().and_then(|n| n.to_str()).unwrap_or("project").to_string()
     });
@@ -409,6 +437,95 @@ fn run_indexer(repo: &Path, db: &Path, spec: &IndexSpec, reuse: bool) -> Result<
     }
     println!("  {:.1}s", t.elapsed().as_secs_f64());
     Ok(out)
+}
+
+/// Index inputs under `root` modified after `scip` was written (sorted, root-relative).
+fn newer_inputs(root: &Path, lang: Lang, scip: &Path) -> Vec<String> {
+    let Some(written) = std::fs::metadata(scip).and_then(|m| m.modified()).ok() else {
+        return vec!["(unreadable SCIP)".into()];
+    };
+    let mut newer: Vec<String> = walk_files(root)
+        .into_iter()
+        .filter(|rel| lang.is_index_input(rel))
+        .filter(|rel| std::fs::metadata(root.join(rel)).and_then(|m| m.modified()).is_ok_and(|t| t > written))
+        .collect();
+    newer.sort();
+    newer
+}
+
+/// One index per named dependency (every version in the lock file), cached under
+/// $CG_DEPS_CACHE (default ~/.cache/cg/deps) by name, version and source: a released crate never
+/// changes, so it is indexed once per machine and shared by every clone and agent.
+fn dep_specs(rust_root: &Path, names: &[String]) -> Result<Vec<IndexSpec>> {
+    let out = Command::new("cargo").args(["metadata", "--format-version", "1"]).current_dir(rust_root).output()?;
+    if !out.status.success() {
+        bail!("cargo metadata for deps: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or(""));
+    }
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let ws: HashSet<&str> = meta["workspace_members"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
+    let cache = std::env::var_os("CG_DEPS_CACHE").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".cache/cg/deps")
+    });
+    let mut specs = Vec::new();
+    for name in names {
+        let found: Vec<&serde_json::Value> = meta["packages"].as_array().into_iter().flatten()
+            .filter(|p| p["name"].as_str() == Some(name.as_str()) && !p["id"].as_str().is_some_and(|id| ws.contains(id)))
+            .collect();
+        if found.is_empty() {
+            eprintln!("warning: dep {name} is not a dependency of {} (workspace members are indexed already)", rust_root.display());
+        }
+        for p in found {
+            let version = p["version"].as_str().unwrap_or_default();
+            let source = p["source"].as_str().unwrap_or("path");
+            let dir = cache.join(format!("{name}-{version}-{}", &fnv(source.as_bytes())[..8]));
+            match index_dep(Path::new(p["manifest_path"].as_str().unwrap_or_default()), &dir, &cache) {
+                Ok(scip) => specs.push(IndexSpec {
+                    lang: Lang::Rust,
+                    root: dir.join("src").to_string_lossy().into_owned(),
+                    cmd: None,
+                    scip: Some(scip.to_string_lossy().into_owned()),
+                    name: Some(format!("{name}@{version}")),
+                    dep: true,
+                }),
+                Err(e) => eprintln!("warning: skipping dep {name} {version}: {e:#}"),
+            }
+        }
+    }
+    Ok(specs)
+}
+
+/// Copy the crate out of the cargo registry (rust-analyzer writes a lock file and needs the crate
+/// to be its own workspace), index it, keep both: the graph reads source lines at every build.
+fn index_dep(manifest: &Path, dir: &Path, cache: &Path) -> Result<PathBuf> {
+    let scip = dir.join("index.scip");
+    if scip.is_file() {
+        return Ok(scip);
+    }
+    let from = manifest.parent().context("dependency manifest has no directory")?;
+    let src = dir.join("src");
+    let _ = std::fs::remove_dir_all(&src);
+    for rel in walk_files(from) {
+        let to = src.join(&rel);
+        std::fs::create_dir_all(to.parent().expect("file path has a parent"))?;
+        std::fs::copy(from.join(&rel), &to).with_context(|| format!("copying {rel}"))?;
+    }
+    let toml = src.join("Cargo.toml");
+    let text = std::fs::read_to_string(&toml).context("dependency Cargo.toml")?;
+    if !text.lines().any(|l| l.trim() == "[workspace]") {
+        std::fs::write(&toml, text + "\n[workspace]\n")?;
+    }
+    println!("rust index (dep {}) ...", dir.file_name().unwrap_or_default().to_string_lossy());
+    let t = Instant::now();
+    let tmp = dir.join("index.scip.tmp");
+    let res = Command::new("rust-analyzer").arg("scip").arg(".").arg("--output").arg(&tmp)
+        .env("CARGO_TARGET_DIR", cache.join("target"))
+        .current_dir(&src).output().context("running rust-analyzer scip")?;
+    if !res.status.success() || !tmp.is_file() {
+        bail!("rust-analyzer scip failed: {}", String::from_utf8_lossy(&res.stderr).lines().last().unwrap_or(""));
+    }
+    std::fs::rename(&tmp, &scip)?; // complete or absent: a killed build never leaves half an index
+    println!("  {:.1}s", t.elapsed().as_secs_f64());
+    Ok(scip)
 }
 
 fn shell_quote(s: &str) -> String {
@@ -698,6 +815,8 @@ fn process_document(repo: &Path, rel: &str, spec: &IndexSpec, doc: &Document, g:
             doc: lang::doc_text(si).chars().take(300).collect(),
             attrs,
             cc,
+            cfg: String::new(),
+            features: String::new(),
             span,
             name,
             descs: parsed.descs,
@@ -750,6 +869,8 @@ fn process_document(repo: &Path, rel: &str, spec: &IndexSpec, doc: &Document, g:
                 attrs: lang::leading_attrs(&lines, imp.line as usize).chars().take(300).collect(),
                 doc: String::new(),
                 cc: 0,
+                cfg: String::new(),
+                features: String::new(),
                 span: 0,
                 descs: parsed.descs,
                 imp: Some(imp),
@@ -893,6 +1014,20 @@ fn finish(g: &mut Graph) {
         if parent_test || own {
             g.sym.get_mut(id).expect("present").is_test = true;
         }
+    }
+
+    // cfg scope flows down the same way: an item builds only when its module's conditions hold too
+    for id in &order {
+        let parent = parent_id(&g.sym[id]).and_then(|p| g.sym.get(&p)).map(|p| p.cfg.clone()).unwrap_or_default();
+        let s = &g.sym[id];
+        let own = lang::cfg_conditions(&format!("{} {}", s.attrs, g.mod_attrs.get(id).map_or("", String::as_str)));
+        let conds: Vec<String> = (!parent.is_empty()).then_some(parent).into_iter().chain(own).collect();
+        let mut features: Vec<String> = conds.iter().flat_map(|c| lang::required_features(c)).collect();
+        features.sort();
+        features.dedup();
+        let s = g.sym.get_mut(id).expect("present");
+        s.cfg = conds.join(" && ");
+        s.features = features.join(",");
     }
 
     // Rust impl blocks -> IMPLEMENTS (type->trait, method->trait method) and HAS_METHOD
@@ -1051,14 +1186,14 @@ fn write_db(
         S(s.id.clone()), S(s.name.clone()), S(s.path.clone()), S(s.kind.into()), S(s.lang.name().into()), S(s.package.clone()), B(false),
         S(s.file.clone()), I(s.line.into()), I(s.end_line.into()), I((s.end_line - s.line + 1).into()), S(s.visibility.into()),
         B(s.is_async), B(s.is_unsafe), B(s.is_test), S(s.trait_name.clone()), S(s.self_type.clone()), S(s.signature.clone()),
-        S(s.attrs.clone()), S(s.doc.clone()), I(s.cc),
+        S(s.attrs.clone()), S(s.doc.clone()), I(s.cc), S(s.cfg.clone()), S(s.features.clone()),
     ]).chain(g.ext.iter().map(|(id, e)| vec![
         S(id.clone()), S(e.name.clone()), S(e.path.clone()), S(e.kind.into()), S(e.lang.into()), S(e.package.clone()), B(true),
         S(String::new()), I(0), I(0), I(0), S(String::new()), B(false), B(false), B(false), S(String::new()), S(String::new()),
-        S(String::new()), S(String::new()), S(String::new()), I(0),
+        S(String::new()), S(String::new()), S(String::new()), I(0), S(String::new()), S(String::new()),
     ]));
     w("Symbol", "symbol.csv", "", &["id", "name", "path", "kind", "lang", "package", "external", "file", "line", "end_line", "loc",
-      "visibility", "is_async", "is_unsafe", "is_test", "trait_name", "self_type", "signature", "attrs", "doc", "cc"], &mut syms)?;
+      "visibility", "is_async", "is_unsafe", "is_test", "trait_name", "self_type", "signature", "attrs", "doc", "cc", "cfg", "features"], &mut syms)?;
     w("Channel", "channel.csv", "", &["id", "channel", "key", "providers", "users"],
       &mut channels.iter().map(|c| vec![S(c.0.clone()), S(c.1.clone()), S(c.2.clone()), I(c.3), I(c.4)]))?;
     w("DEPENDS_ON", "depends.csv", "", &["from", "to", "kind"],
