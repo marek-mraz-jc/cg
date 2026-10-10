@@ -23,7 +23,7 @@ precision; SCIP-derived edges are what rust-analyzer resolves.
 
 | Node | Key properties |
 |---|---|
-| `Symbol` | `name`, `path`, `kind`, `lang`, `package`, `file`, `line`, `signature`, `doc`, `visibility`, `is_test`, `is_async`, `cc`, `external` |
+| `Symbol` | `name`, `path`, `kind`, `lang`, `package`, `file`, `line`, `signature`, `doc`, `visibility`, `is_test`, `is_async`, `cc`, `external`, `cfg`, `features` |
 | `File` | `path`, `lang`, `package`, `lines`, `is_test`, `commits_1y`, `last_change` |
 | `Package` | `name`, `lang`, `version`, `workspace` |
 | `Channel` | `channel` (`http`, `nats`, ...), `key` (`POST /api/entities`, `entities.created`), `providers`, `users` |
@@ -44,6 +44,18 @@ through trait objects into the store implementation, and into a message subscrib
 language. Leave out `DISPATCHES` and the path stops at the trait method: on Antares, `delete_entity`
 reaches 128 functions within 4 hops over `CALLS` alone and 202 with `DISPATCHES`.
 
+`cfg` holds a Rust symbol's `#[cfg(...)]` conditions together with those of every enclosing module,
+joined by ` && `. `features` lists the cargo features those conditions require: `feature = "x"` and
+the conjuncts of `all(...)`; `not(...)` and `any(...)` require none. An empty `features` means the
+symbol compiles in every build. Optional crates, `required-features` and a `#![cfg]` at the top of a
+file are not covered; Cargo.toml has those.
+
+```cypher
+// what the odata feature adds, and feature-only code that reaches the store crate
+MATCH (s:Symbol) WHERE s.features CONTAINS 'odata' AND NOT s.is_test RETURN s.kind, count(*);
+MATCH (s:Symbol)-[:CALLS*1..3]->(x:Symbol) WHERE s.features <> '' AND x.package = 'antares-store' RETURN DISTINCT s.path, s.features;
+```
+
 ## Project configuration: `.cg/`
 
 Everything project-specific lives in the project, not in `cg`.
@@ -53,6 +65,7 @@ Everything project-specific lives in the project, not in `cg`.
 
 ```toml
 db = ".cg/db"              # default
+deps = ["serde_json"]      # Rust dependencies to index too (same as `cg build --deps serde_json`)
 
 [[index]]
 lang = "rust"              # rust | typescript | python
@@ -73,7 +86,24 @@ name = "worker"            # scip-python project name (default: directory name)
 Indexers: `rust-analyzer` (`rustup component add rust-analyzer`); `scip-typescript` and `scip-python`
 from npm (`@sourcegraph/scip-typescript`, `@sourcegraph/scip-python`) on `PATH`, otherwise `cg` runs
 them through `npx`. An index whose indexer fails is skipped with a warning; the others still load.
-`cg build --reuse` skips indexers whose output from the previous build exists.
+`cg build --reuse` keeps the previous build's SCIP output for an index whose sources (and manifests)
+have not changed since; an index with a newer source file is indexed again. Loading a stale SCIP
+against current sources would shift lines and test flags, so `--reuse` never does that.
+
+### Dependencies: `--deps`
+
+By default a dependency's symbols are boundary nodes (`external=true`, no file, no edges out).
+`cg build --deps serde_json,axum` (or `deps = [...]` in the config) indexes those Rust crates as well:
+`cg` finds every version the workspace resolves through `cargo metadata`, copies each one into
+`~/.cache/cg/deps/<name>-<version>-<hash>` (or `$CG_DEPS_CACHE`) and runs rust-analyzer there once per
+version. Calls from the workspace then land on real definitions (`external=false`, `package` = crate
+name, `Package.workspace=false`), and `CALLS` continues inside the dependency. On Antares, serde_json
+took 17 s to index; 4,213 calls landed on 57 serde_json definitions.
+
+```cypher
+MATCH (c:Symbol)-[:CALLS]->(f:Symbol {package:'serde_json'})-[:CALLS*1..2]->(g:Symbol {package:'serde_json'})
+WHERE NOT c.is_test AND NOT f.external RETURN f.path, count(DISTINCT g) ORDER BY count(DISTINCT g) DESC LIMIT 10;
+```
 
 ### Link rules: `.cg/links/*.toml`
 
@@ -126,7 +156,7 @@ MATCH (c:Symbol)-[:CALLS*1..3]->(f:Symbol {path:'poly_server::store::MemStore::p
 MATCH (m:Symbol)-[:IMPLEMENTS]->(t:Symbol {path:'poly_server::store::Store::get'}) RETURN m.path, m.file;
 ```
 
-`cg schema` prints the full list. Every `cg q` output starts with the build time and lists indexed
+`cg schema` prints the full list; a test runs every listed example against the fixture. Every `cg q` output starts with the build time and lists indexed
 files edited since, so stale answers are visible. An empty result prints hints for literals that
 match nothing, with similar names.
 
@@ -169,7 +199,10 @@ need no more.
 
 ## Limits
 
-- The graph is a snapshot; rebuild after edits (`cg q` lists the files changed since).
+- The graph is a snapshot; rebuild after edits (`cg q` lists the files changed since). Rebuilding a
+  Rust index runs rust-analyzer over the whole workspace (about 90 s on a 140k-line workspace); there is
+  no per-crate incremental index yet.
+- Use the graph for relations, then read the code: it says where to look, not what the code does.
 - Link rules are regexes: a URL built at run time from variables does not match. `strip`, `prefix`
   and `{}` normalisation cover base URLs and path parameters; anything else needs its own rule.
 - Writes to fields are not recorded: none of the three indexers marks write access.
