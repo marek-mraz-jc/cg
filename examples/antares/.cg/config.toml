@@ -1,0 +1,8 @@
+[[index]]
+lang = "rust"
+root = "."
+scip = "../runs/index.scip"
+
+[[index]]
+lang = "typescript"
+root = "www"

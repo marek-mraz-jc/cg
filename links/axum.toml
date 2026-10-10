@@ -1,0 +1,11 @@
+# axum routes: .route("/entities/{id}", get(read).delete(remove)) -> provides "GET /entities/{}" on handler `read`.
+# Set `prefix` to the path the router is nested under (.nest("/api", ...)).
+[[link]]
+name = "axum-route"
+channel = "http"
+role = "provides"
+files = ["**/*.rs"]
+pattern = '(?s)\.route\(\s*"(?P<key>[^"]+)"\s*,(?P<body>.*?)\)\s*,?\s*\)'
+each = '(?P<verb>get|post|put|patch|delete|head|options)\(\s*(?P<symbol>[\w:]+)'
+key = "{verb} {key}"
+prefix = ""

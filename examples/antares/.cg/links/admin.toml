@@ -1,0 +1,61 @@
+# Routes no regex can key: the /q surface mounts paths from the Admin::PATHS const
+# (crates/antares-api/src/lib.rs), and /ex/v1/remote-notify sits outside the /ngsi-ld/v1 nest.
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "GET /q/health"
+symbol = "antares_api::health"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "GET /q/ready"
+symbol = "antares_api::ready"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "GET /q/metrics"
+symbol = "antares_api::metrics_endpoint"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "GET /q/tenants"
+symbol = "antares_api::tenants_list"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "GET /q/tenants/{tenant}"
+symbol = "antares_api::tenant_get"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "DELETE /q/tenants/{tenant}"
+symbol = "antares_api::tenant_purge"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "GET /q/dead-letters"
+symbol = "antares_api::dead_letters_list"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "DELETE /q/dead-letters/{id}"
+symbol = "antares_api::dead_letter_delete"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "POST /q/dead-letters/{id}/replay"
+symbol = "antares_api::dead_letter_replay"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "POST /ex/v1/remote-notify"
+symbol = "antares_api::distsub::remote_notify"

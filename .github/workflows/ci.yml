@@ -1,0 +1,23 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # build + test + clippy inside the GCC 14 / Debian 12 image (see Dockerfile)
+      - run: docker build --output dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cg-linux-x86_64
+          path: dist/cg
+      - if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/cg --repo "$GITHUB_REPOSITORY" --generate-notes
+    permissions:
+      contents: write

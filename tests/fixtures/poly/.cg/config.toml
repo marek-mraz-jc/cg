@@ -1,0 +1,16 @@
+# Prebuilt indexes keep the integration test independent of installed indexers;
+# delete the `scip` lines to index for real (see README).
+[[index]]
+lang = "rust"
+root = "server"
+scip = ".cg/scip/server.scip"
+
+[[index]]
+lang = "typescript"
+root = "web"
+scip = ".cg/scip/web.scip"
+
+[[index]]
+lang = "python"
+root = "worker"
+scip = ".cg/scip/worker.scip"

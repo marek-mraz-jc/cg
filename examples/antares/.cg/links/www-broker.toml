@@ -1,0 +1,17 @@
+# Antares playground: www/src/broker/api.js talks to the broker through its own helpers.
+[[link]]
+name = "www-api"
+channel = "http"
+role = "uses"
+files = ["www/src/**/*.js", "www/src/**/*.jsx"]
+pattern = '''\b(?:api|brokerFetch)\(\s*(?:\w+\s*,\s*)?[`"'](?P<key>/[^`"']+)[`"'](?:\s*,\s*\{[^}]*?method:\s*["'](?P<verb>\w+)["'])?'''
+key = "{verb} {key}"
+defaults = { verb = "GET" }
+
+[[link]]
+name = "www-postLd"
+channel = "http"
+role = "uses"
+files = ["www/src/**/*.js"]
+pattern = '''\bpostLd\(\s*\w+\s*,\s*[`"'](?P<key>/[^`"']+)[`"']'''
+key = "POST {key}"

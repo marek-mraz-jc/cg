@@ -1,0 +1,9 @@
+# Rust HTTP clients: reqwest::get("..."), client.post(format!("{base}/x/{}", id)).
+[[link]]
+name = "reqwest"
+channel = "http"
+role = "uses"
+files = ["**/*.rs"]
+pattern = '''(?:reqwest::|client\.|http\.)(?P<verb>get|post|put|patch|delete)\(\s*&?(?:format!\(\s*)?"(?P<key>[^"]+)"'''
+key = "{verb} {key}"
+strip = ['^\{[A-Za-z_]*\}']

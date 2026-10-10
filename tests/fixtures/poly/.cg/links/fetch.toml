@@ -1,0 +1,20 @@
+# Browser / Node HTTP clients: fetch("/x", { method: "POST" }), axios.get("/x"), api.post(`/x/${id}`).
+# `strip` removes base-URL variables such as `${API}` before matching.
+[[link]]
+name = "fetch"
+channel = "http"
+role = "uses"
+files = ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"]
+pattern = '''fetch\(\s*[`"'](?P<key>[^`"']+)[`"'](?:\s*,\s*\{[^}]*?method:\s*["'](?P<verb>\w+)["'])?'''
+key = "{verb} {key}"
+defaults = { verb = "GET" }
+strip = ['^\$\{[A-Z_a-z.]+\}']
+
+[[link]]
+name = "axios"
+channel = "http"
+role = "uses"
+files = ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"]
+pattern = '''\b(?:axios|api|http|client)\.(?P<verb>get|post|put|patch|delete)\(\s*[`"'](?P<key>[^`"']+)[`"']'''
+key = "{verb} {key}"
+strip = ['^\$\{[A-Z_a-z.]+\}']

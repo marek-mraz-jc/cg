@@ -1,0 +1,27 @@
+# FastAPI / Flask / Starlette-style decorators on the handler:
+#   @app.get("/stats")            @router.post("/items/{id}")          @bp.route("/x", methods=["POST"])
+[[link]]
+name = "py-decorator-route"
+channel = "http"
+role = "provides"
+files = ["**/*.py"]
+pattern = '''@\w+\.(?P<verb>get|post|put|patch|delete)\(\s*["'](?P<key>[^"']+)["'][^\n]*\n(?:\s*@[^\n]*\n)*\s*(?:async\s+)?def\s+(?P<symbol>\w+)'''
+key = "{verb} {key}"
+
+[[link]]
+name = "flask-route"
+channel = "http"
+role = "provides"
+files = ["**/*.py"]
+pattern = '''@\w+\.route\(\s*["'](?P<key>[^"']+)["'](?:[^\n]*?methods\s*=\s*\[\s*["'](?P<verb>\w+)["'])?[^\n]*\n(?:\s*@[^\n]*\n)*\s*(?:async\s+)?def\s+(?P<symbol>\w+)'''
+key = "{verb} {key}"
+defaults = { verb = "GET" }
+
+[[link]]
+name = "py-http-client"
+channel = "http"
+role = "uses"
+files = ["**/*.py"]
+pattern = '''\b(?:requests|httpx|client|session)\.(?P<verb>get|post|put|patch|delete)\(\s*f?["'](?P<key>[^"']+)["']'''
+key = "{verb} {key}"
+strip = ['^\{[A-Za-z_.]+\}']

@@ -1,0 +1,18 @@
+# NATS (any language): publish = uses, subscribe = provides. Subjects match with * and > wildcards.
+# A handler passed as the next argument (Rust fn, Python cb=...) owns the subscription;
+# otherwise the enclosing function does.
+[[link]]
+name = "nats-publish"
+channel = "nats"
+role = "uses"
+files = ["**/*.rs", "**/*.py", "**/*.ts", "**/*.js"]
+pattern = '''\.(?:publish|request)\(\s*(?:&?format!\(\s*)?f?[`"'](?P<key>[^`"']+)[`"']'''
+sep = "."
+
+[[link]]
+name = "nats-subscribe"
+channel = "nats"
+role = "provides"
+files = ["**/*.rs", "**/*.py", "**/*.ts", "**/*.js"]
+pattern = '''\.(?:subscribe|queue_subscribe)\(\s*f?[`"'](?P<key>[^`"']+)[`"'](?:\s*,\s*(?:cb\s*=\s*)?(?P<symbol>[A-Za-z_][\w.:]*))?'''
+sep = "."

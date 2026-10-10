@@ -1,0 +1,20 @@
+[package]
+name = "cg"
+version = "0.1.0"
+edition = "2024"
+description = "Cypher-queryable code graph from SCIP indexes (Rust, TypeScript, Python) with per-project service links"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4", features = ["derive"] }
+glob = "0.3.4"
+lbug = "0.21.2"
+protobuf = "3"
+regex = "1.13.1"
+scip = "0.10.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.8"
