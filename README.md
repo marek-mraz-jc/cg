@@ -44,6 +44,18 @@ EOF
 Plain Cypher gets `hint:` lines for answers that look right but are not: `[:CALLS*]` without
 `DISPATCHES` (stops at trait methods), an unbounded path, and a `name` that matches several symbols.
 
+### Nudge for agents: `cg hook`
+
+Agents reach for `grep` out of habit. `cg hook` is a Claude Code PostToolUse hook: when a `grep -r`, `rg`,
+`git grep` or Grep-tool search looks for a code symbol (`fn x`, `a::b`, `x(`, a snake_case or CamelCase
+name) inside a repo that has a graph, it adds the matching `CALLERS` / `IMPACT` call to the agent's
+context, at most once per 20 minutes per session. Text searches and output filters (`... | grep`) stay
+silent. In `settings.json` (or managed settings):
+
+```json
+"hooks": {"PostToolUse": [{"matcher": "Bash|Grep", "hooks": [{"type": "command", "command": "cg hook"}]}]}
+```
+
 ## Why SCIP and not tree-sitter
 
 Callers come from the language's own compiler front end (rust-analyzer, the TypeScript compiler,

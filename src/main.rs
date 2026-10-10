@@ -2,6 +2,7 @@
 //! per-project service links. Agents ask many structural questions in one call.
 
 mod build;
+mod hook;
 mod lang;
 mod links;
 mod query;
@@ -21,6 +22,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Claude Code PostToolUse hook (matcher Bash|Grep): reads the event on stdin and, when a text search
+    /// looks for a code symbol in a repo with a graph, suggests the cg recipe; silent otherwise
+    Hook,
     /// Index the repo (runs rust-analyzer / scip-typescript / scip-python) and load the graph
     Build {
         #[arg(long, default_value = ".")]
@@ -87,6 +91,16 @@ fn main() -> Result<()> {
             let db = resolve_db(db, &repo)?;
             let db = if db.is_absolute() { db } else { std::env::current_dir()?.join(db) };
             build::build(&build::Opts { repo, db, reuse, deps })
+        }
+        Cmd::Hook => {
+            // a hook must never break the agent's tool call: every failure is silence
+            let mut input = String::new();
+            if std::io::stdin().read_to_string(&mut input).is_ok()
+                && let Some(out) = hook::respond(&input)
+            {
+                println!("{out}");
+            }
+            Ok(())
         }
         Cmd::Schema { db } => query::schema(&resolve_db(db, &project_root())?),
         Cmd::Q { db, e, file, max_rows, timeout } => {
