@@ -12,6 +12,38 @@ cg q -e "<cypher>" -e "..."   # many statements per call
 cg q queries.cypher           # statements end with ';' at the end of a line
 ```
 
+## Install
+
+Linux x86_64, glibc 2.36 or newer (Debian 12, Ubuntu 22.10+), one static-libstdc++ binary:
+
+```
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/marek-mraz-jc/cg/releases/latest/download/cg -o ~/.local/bin/cg
+chmod +x ~/.local/bin/cg && cg --version
+```
+
+`cg build` also needs the indexer for each language it finds: `rustup component add rust-analyzer`;
+TypeScript and Python indexers run through `npx` when they are not on `PATH` (see below).
+
+## Asking without writing Cypher
+
+Inside any `cg q` batch, one word and a symbol answer the common questions. Each recipe prints the
+Cypher it ran, so you can copy it and adapt it:
+
+```
+cg q - <<'EOF'
+CALLERS poly_server::store::Store::put;
+IMPACT on_created;
+TESTS create_entity;
+ROUTES /api/entities;
+FEATURE odata;
+EOF
+```
+
+`CALLERS`, `CALLEES`, `IMPLS`, `REACH`, `IMPACT`, `TESTS`, `ROUTES`, `FEATURE`; `HELP;` lists them.
+Plain Cypher gets `hint:` lines for answers that look right but are not: `[:CALLS*]` without
+`DISPATCHES` (stops at trait methods), an unbounded path, and a `name` that matches several symbols.
+
 ## Why SCIP and not tree-sitter
 
 Callers come from the language's own compiler front end (rust-analyzer, the TypeScript compiler,

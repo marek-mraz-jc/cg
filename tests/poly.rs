@@ -155,8 +155,31 @@ fn cfg_of_enclosing_modules_is_inherited() {
 #[test]
 fn every_schema_example_runs() {
     let schema = cg(&["schema", "--db", db()]);
-    let stmts: Vec<&str> = schema.lines().filter(|l| ["MATCH ", "RETURN ", "SHOW ", "GREP "].iter().any(|k| l.starts_with(k))).collect();
+    let stmts: Vec<&str> = schema.lines().filter(|l| ["MATCH ", "RETURN ", "SHOW ", "GREP ", "CALLERS ", "IMPACT ", "TESTS "].iter().any(|k| l.starts_with(k))).collect();
     assert!(stmts.len() > 15, "{schema}");
     let out = cg(&["q", "--db", db(), "-e", &stmts.join("\n")]);
     assert!(!out.contains("ERROR"), "{out}");
+}
+
+#[test]
+fn recipes_print_their_cypher_and_answer() {
+    let out = cg(&["q", "--db", db(), "-e", "CALLERS poly_server::store::Store::put", "-e", "TESTS create_entity", "-e", "IMPLS Store",
+                   "-e", "ROUTES /api/entities", "-e", "HELP"]);
+    assert!(out.contains("-- MATCH (c:Symbol)-[r:CALLS]->"), "{out}");
+    assert!(out.contains("poly_server::create_entity | False"), "caller of Store::put via MemStore::put or the trait:\n{out}");
+    assert!(out.contains("poly_server::tests::creates"), "{out}");
+    assert!(out.contains("poly_server::store::MemStore"), "{out}");
+    assert!(out.contains("POST /api/entities | poly_server::create_entity"), "{out}");
+    assert!(out.contains("FEATURE <name>"), "{out}");
+    assert!(!out.contains("ERROR"), "{out}");
+}
+
+#[test]
+fn lints_flag_answers_that_look_right_but_are_not() {
+    let out = q("MATCH (a:Symbol {name:'put'})-[:CALLS*]->(b:Symbol) RETURN count(*)");
+    assert!(out.contains("hint: [:CALLS*] stops at trait"), "{out}");
+    assert!(out.contains("hint: unbounded variable-length path"), "{out}");
+    assert!(out.contains("hint: name 'put' matches"), "{out}");
+    let clean = q("MATCH (a:Symbol {path:'poly_server::store::MemStore::put'})-[:CALLS|DISPATCHES*1..2]->(b:Symbol) RETURN count(*)");
+    assert!(!clean.contains("hint:"), "{clean}");
 }

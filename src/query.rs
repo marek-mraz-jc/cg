@@ -55,10 +55,15 @@ Workflow
 
 pub const EXAMPLES: &str = "\
 Examples (one `cg q` call runs them all; each statement ends with ';' at the end of a line)
-Besides Cypher a batch takes two statements, so one call can answer AND verify:
+Besides Cypher a batch takes recipes (HELP lists them: CALLERS CALLEES IMPLS REACH IMPACT TESTS ROUTES FEATURE)
+and two statements that answer AND verify in the same call:
   SHOW <path|name|file|file:a-b>, ...  source of symbols / files / ranges (5 symbols per name, 150 lines each)
   GREP <regex> [IN <glob>, ...]    text in all git-tracked files; each hit names its enclosing symbol, test and comment
                                    flags; the totals line counts distinct non-test enclosing symbols
+// recipes: the common questions without writing Cypher (each prints the query it ran)
+CALLERS poly_server::store::Store::put;
+IMPACT on_created;
+TESTS create_entity;
 // read the code behind an answer
 SHOW poly_server::store::MemStore::put, on_created;
 // text the graph has no edge for (macro bodies, strings, config keys), with owners
@@ -298,6 +303,63 @@ pub fn compact_schema(c: &Connection) -> Result<String> {
     Ok(parts.join("; "))
 }
 
+// ---------------------------------------------------------------- recipes and lints
+
+pub const RECIPES: &str = "\
+Recipes: one word + a symbol path or name, inside any batch; each prints the Cypher it runs, copy and adapt it.
+  CALLERS <sym>   direct callers, incl. callers through the trait method it implements (via column)
+  CALLEES <sym>   what it calls directly; external = dependency/std
+  IMPLS <sym>     types implementing a trait / interface, methods implementing or overriding a method
+  REACH <sym>     non-test code it reaches within 4 hops over CALLS|DISPATCHES|LINKS_TO
+  IMPACT <sym>    code that reaches it within 3 hops (blast radius of a change), tests last
+  TESTS <sym>     tests that reach it within 4 hops
+  ROUTES [text]   HTTP routes / subjects whose key contains text, with handler and caller counts
+  FEATURE <name>  non-test symbols that need cargo feature <name>
+  HELP            this list";
+
+fn recipe(head: &str, arg: &str) -> Option<String> {
+    let t = arg.trim().trim_matches(['\'', '"']).replace('\'', "\\'");
+    let f = format!("(f.path = '{t}' OR f.name = '{t}')");
+    Some(match head {
+        "CALLERS" => format!("MATCH (c:Symbol)-[r:CALLS]->(m:Symbol)-[:IMPLEMENTS*0..1]-(f:Symbol) WHERE {f} \
+            RETURN DISTINCT c.path, c.is_test, c.file, r.line, f.path, CASE WHEN m.id = f.id THEN '' ELSE m.path END AS via ORDER BY c.is_test, c.path"),
+        "CALLEES" => format!("MATCH (f:Symbol)-[r:CALLS]->(x:Symbol) WHERE {f} RETURN DISTINCT f.path, x.path, x.external, r.line ORDER BY x.external, r.line"),
+        "IMPLS" => format!("MATCH (x:Symbol)-[:IMPLEMENTS]->(f:Symbol) WHERE {f} RETURN f.path, x.path, x.kind, x.file, x.line ORDER BY x.path"),
+        "REACH" => format!("MATCH (f:Symbol)-[:CALLS|DISPATCHES|LINKS_TO*1..4]->(x:Symbol) WHERE {f} AND NOT x.external AND NOT x.is_test \
+            RETURN DISTINCT x.package, x.path ORDER BY x.package, x.path"),
+        "IMPACT" => format!("MATCH (c:Symbol)-[:CALLS|DISPATCHES|LINKS_TO*1..3]->(f:Symbol) WHERE {f} \
+            RETURN DISTINCT c.is_test, c.path, c.file ORDER BY c.is_test, c.path"),
+        "TESTS" => format!("MATCH (x:Symbol {{is_test:true}})-[:CALLS|DISPATCHES*1..4]->(f:Symbol) WHERE {f} RETURN DISTINCT x.path, x.file, x.line ORDER BY x.path"),
+        "ROUTES" => format!("MATCH (h)-[p:PROVIDES]->(c:Channel) WHERE c.key CONTAINS '{t}' RETURN c.channel, c.key, h.path, p.file, p.line, c.users ORDER BY c.key"),
+        "FEATURE" => format!("MATCH (s:Symbol) WHERE list_contains(string_split(s.features, ','), '{t}') AND NOT s.is_test \
+            RETURN s.kind, s.path, s.file, s.line ORDER BY s.file, s.line"),
+        _ => return None,
+    })
+}
+
+static NAME_LIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bname\s*[:=]\s*'((?:[^'\\]|\\.)+)'").unwrap());
+static CALLS_ONLY_VAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\w*:CALLS\*").unwrap());
+static UNBOUNDED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\s*(?:\d+\s*)?\.\.\s*\]|\*\s*\]").unwrap());
+
+/// Mistakes that return a plausible but wrong answer: printed before the result.
+fn lint(c: &Connection, q: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    if CALLS_ONLY_VAR.is_match(q) {
+        out.push("[:CALLS*] stops at trait / interface methods; [:CALLS|DISPATCHES*..] also reaches the impl bodies".into());
+    }
+    if UNBOUNDED.is_match(q) {
+        out.push("unbounded variable-length path: give it an upper bound (*1..4)".into());
+    }
+    for m in NAME_LIT.captures_iter(q) {
+        let paths = rows(c, "MATCH (s:Symbol {name:$n}) WHERE NOT s.external RETURN DISTINCT s.path ORDER BY s.path LIMIT 6", vec![("n", Value::String(m[1].into()))])?;
+        if paths.len() > 1 {
+            let shown: Vec<String> = paths.iter().take(5).map(|r| s(&r[0])).collect();
+            out.push(format!("name '{}' matches {}{} symbols ({}): use path:'...' for one", &m[1], paths.len().min(5), if paths.len() > 5 { "+" } else { "" }, shown.join(", ")));
+        }
+    }
+    Ok(out)
+}
+
 pub fn run(db: &Path, text: &str, max_rows: usize, timeout_s: u64) -> Result<()> {
     let database = open(db)?;
     let c = Connection::new(&database)?;
@@ -309,6 +371,21 @@ pub fn run(db: &Path, text: &str, max_rows: usize, timeout_s: u64) -> Result<()>
         println!("\n### Q{}{}", n + 1, if label.is_empty() { String::new() } else { format!(": {label}") });
         let t = Instant::now();
         let head = q.split_whitespace().next().unwrap_or("").to_uppercase();
+        if head == "HELP" {
+            println!("{RECIPES}");
+            continue;
+        }
+        let expanded = recipe(&head, q.trim_start().get(head.len()..).unwrap_or(""));
+        let q = match &expanded {
+            Some(cy) => {
+                println!("-- {cy};");
+                cy
+            }
+            None => q,
+        };
+        for h in lint(&c, q)? {
+            println!("hint: {h}");
+        }
         if head == "SHOW" || head == "GREP" {
             let arg = q.trim_start()[4..].trim();
             let done = if head == "SHOW" { show(&c, arg) } else { grep(&c, arg, max_rows, &mut grep_cache) };
