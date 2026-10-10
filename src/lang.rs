@@ -357,6 +357,82 @@ pub fn macro_body_calls(body: &str, krate: &str) -> Vec<String> {
         .collect()
 }
 
+static MACRO_PARAM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$(\w+)\s*:\s*\w+").unwrap());
+static MACRO_FN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfn\s+\$(\w+)").unwrap());
+static PLAIN_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[^.\w$:])([a-z_][a-z0-9_]*)\s*\(").unwrap());
+const NOT_CALLS: &[&str] = &["if", "while", "match", "return", "for", "in", "as", "move", "async", "await", "let", "loop", "unsafe", "where", "impl"];
+
+/// What a `macro_rules!` generates from ident arguments: its first arm's parameters in order, and for every
+/// `fn $param` item in its body the calls that item makes (`name` unqualified, or a crate-resolved path).
+#[derive(Debug, Default, PartialEq)]
+pub struct MacroItems {
+    pub params: Vec<String>,
+    pub items: Vec<(String, Vec<String>)>,
+}
+
+pub fn macro_fn_items(body: &str, krate: &str) -> MacroItems {
+    let matcher = body.split("=>").next().unwrap_or("");
+    let params = MACRO_PARAM.captures_iter(matcher).map(|c| c[1].to_string()).collect();
+    let starts: Vec<(usize, String)> = MACRO_FN.captures_iter(body).map(|c| (c.get(0).map_or(0, |m| m.end()), c[1].to_string())).collect();
+    let items = starts.iter().enumerate().map(|(i, (at, param))| {
+        let chunk = &body[*at..starts.get(i + 1).map_or(body.len(), |n| n.0)];
+        let mut calls: Vec<String> = PLAIN_CALL.captures_iter(chunk).map(|c| c[1].to_string()).filter(|n| !NOT_CALLS.contains(&n.as_str())).collect();
+        calls.extend(macro_body_calls(chunk, krate));
+        calls.sort();
+        calls.dedup();
+        (param.clone(), calls)
+    }).collect();
+    MacroItems { params, items }
+}
+
+/// The arguments of the macro invocation whose name starts at `lines[line][col..]`, split at top-level commas,
+/// and the line its closing delimiter is on. None when no delimited invocation starts there.
+pub fn macro_invocation(lines: &[&str], line: usize, col: usize) -> Option<(Vec<String>, usize)> {
+    let first = lines.get(line)?.get(col..)?;
+    let bang = first.find('!')?;
+    let mut stream = lines.iter().enumerate().skip(line).take(400).flat_map(move |(n, l)| {
+        let text = if n == line { &first[bang + 1..] } else { *l };
+        text.chars().chain(std::iter::once('\n')).map(move |c| (n, c))
+    });
+    // only whitespace between `!` and the opening delimiter
+    let (_, open) = stream.find(|(_, c)| !c.is_whitespace())?;
+    if !matches!(open, '(' | '[' | '{') {
+        return None;
+    }
+    let (mut args, mut cur, mut depth, mut quote, mut prev) = (Vec::new(), String::new(), 1usize, false, ' ');
+    for (n, ch) in stream {
+        let escaped = prev == '\\';
+        prev = if escaped { ' ' } else { ch };
+        if quote {
+            quote = !(ch == '"' && !escaped);
+            cur.push(ch);
+            continue;
+        }
+        match ch {
+            '"' => quote = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let last = cur.trim();
+                    if !last.is_empty() {
+                        args.push(last.to_string());
+                    }
+                    return Some((args, n));
+                }
+            }
+            ',' if depth == 1 => {
+                args.push(cur.trim().to_string());
+                cur.clear();
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(if ch == '\n' { ' ' } else { ch });
+    }
+    None
+}
+
 pub static MOD_DECL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;").unwrap());
 
@@ -532,6 +608,35 @@ pub fn scan_impls(lines: &[&str]) -> Vec<ImplBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macro_generated_fns_map_to_their_calls() {
+        let body = r#"macro_rules! route4 {
+    ($create:ident, $retrieve:ident, $kind:expr, $c:literal) => {
+        #[doc = concat!("HTTP handler for ", $c)]
+        pub async fn $create(State(st): State<AppState>, body: Bytes) -> Response {
+            create(&st, $kind, &body).await.unwrap_or_else(|e| e.into_response())
+        }
+        pub async fn $retrieve(Path(id): Path<String>) -> Response {
+            if ok(id) { retrieve(&st, $kind, &id).await } else { $crate::policy::deny() }
+        }
+    };
+}"#;
+        let m = macro_fn_items(body, "antares_api");
+        assert_eq!(m.params, ["create", "retrieve", "kind", "c"]);
+        assert_eq!(m.items, [
+            ("create".to_string(), vec!["create".to_string()]),
+            ("retrieve".to_string(), vec!["antares_api::policy::deny".to_string(), "ok".to_string(), "retrieve".to_string()]),
+        ]);
+    }
+
+    #[test]
+    fn invocation_args_split_at_top_level_commas_only() {
+        let lines = ["    route4!(", "        create_sub,", r#"        Kind::Sub, f(a, "x,)"),"#, "        \"C\"", "    );", "x"];
+        assert_eq!(macro_invocation(&lines, 0, 4), Some((vec!["create_sub".into(), "Kind::Sub".into(), r#"f(a, "x,)")"#.into(), "\"C\"".into()], 4)));
+        assert_eq!(macro_invocation(&["let x = y;"], 0, 0), None);
+        assert_eq!(macro_invocation(&["m! { a, b }"], 0, 0), Some((vec!["a".into(), "b".into()], 0)));
+    }
     use crate::scip::parse;
 
     #[test]

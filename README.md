@@ -251,4 +251,6 @@ need no more.
   and `{}` normalisation cover base URLs and path parameters; anything else needs its own rule.
 - Writes to fields are not recorded: none of the three indexers marks write access.
 - Macro-generated Rust items appear only where rust-analyzer emits them. `macro_rules!` bodies get
-  CALLS edges for qualified paths (`$crate::a::f(`); `.method()` calls inside a macro stay invisible.
+  CALLS edges for qualified paths (`$crate::a::f(`). A fn the macro generates from an ident argument
+  (`fn $create(...) { create(...) }` invoked as `route4!(create_sub, ...)`) gets the calls of its own
+  item, unqualified names resolved in the invoking module; `.method()` calls inside a macro stay invisible.

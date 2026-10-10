@@ -1,5 +1,6 @@
-# Routes no regex can key: the /q surface mounts paths from the Admin::PATHS const
-# (crates/antares-api/src/lib.rs), and /ex/v1/remote-notify sits outside the /ngsi-ld/v1 nest.
+# Routes no regex can key: the admin surface mounts its paths from the Admin::PATHS const
+# (crates/antares-api/src/lib.rs) under /q, and /ex/v1/remote-notify sits outside the /ngsi-ld/v1 nest.
+# View routes (antares-ops) come from the view table at run time: no rule can see them.
 [[endpoint]]
 channel = "http"
 role = "provides"

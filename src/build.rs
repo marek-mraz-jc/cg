@@ -216,6 +216,10 @@ struct Graph {
     mod_attrs: HashMap<String, String>,
     /// macro id -> (Rust path called in its body, line)
     macro_calls: Vec<(String, String, i32)>,
+    /// macro id -> fns it generates from ident arguments, with their calls
+    macro_items: HashMap<String, lang::MacroItems>,
+    /// generated fn id -> (macro id, index of its name among the invocation's arguments)
+    macro_gen: Vec<(String, String, usize)>,
     endpoints: Vec<Endpoint>,
 }
 
@@ -767,6 +771,11 @@ fn process_document(repo: &Path, rel: &str, spec: &IndexSpec, doc: &Document, g:
                     g.macro_calls.push((o.symbol.clone(), path, i as i32 + 1));
                 }
             }
+            let body = lines.get(r.0.max(0) as usize..((er.2 + 1).max(0) as usize).min(lines.len())).unwrap_or(&[]).join("\n");
+            let items = lang::macro_fn_items(&body, &krate);
+            if !items.items.is_empty() {
+                g.macro_items.insert(o.symbol.clone(), items);
+            }
         }
         if kind == "Module" && o.enclosing_range.is_empty() && r.0 == 0 && r.1 == 0 {
             er = (0, 0, last_line + 1, 0); // module without a range (scip-python): the whole file
@@ -880,6 +889,24 @@ fn process_document(repo: &Path, rel: &str, spec: &IndexSpec, doc: &Document, g:
         }
     }
 
+    // fns a macro_rules! generates from ident arguments: rust-analyzer emits no references inside their
+    // bodies, so remember which argument each one is (resolved to calls in finish)
+    if lang == Lang::Rust {
+        for o in doc.occurrences.iter().filter(|o| o.symbol_roles & ROLE_DEFINITION == 0 && o.symbol.ends_with('!')) {
+            let r = scip::range4(&o.range);
+            let Some((args, end)) = lang::macro_invocation(&lines, r.0.max(0) as usize, r.1.max(0) as usize) else { continue };
+            for id in &doc_defs {
+                let Some(d) = g.sym.get(id).filter(|d| is_callable(d.kind)) else { continue };
+                let at = (d.line - 1) as usize;
+                if at >= r.0.max(0) as usize && at <= end
+                    && let Some(k) = args.iter().position(|a| *a == d.name)
+                {
+                    g.macro_gen.push((id.clone(), o.symbol.clone(), k));
+                }
+            }
+        }
+    }
+
     // innermost enclosing definition for every reference
     spans.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     let mut occs: Vec<&scip::Occurrence> = doc.occurrences.iter()
@@ -980,6 +1007,29 @@ fn finish(g: &mut Graph) {
             let (prefix, ty) = owner.rsplit_once("::").unwrap_or(("", owner));
             let q = format!("<{ty} as {}>::{method}", s.trait_name);
             s.path = if prefix.is_empty() { q } else { format!("{prefix}::{q}") };
+        }
+    }
+    // macro-generated fns call what their item in the macro body calls; unqualified names resolve in the
+    // invoking module, ambiguous paths get no edge
+    if !g.macro_gen.is_empty() {
+        let mut by_path: HashMap<&str, Option<&str>> = HashMap::new();
+        for s in g.sym.values().filter(|s| is_callable(s.kind)) {
+            by_path.entry(s.path.as_str()).and_modify(|v| *v = None).or_insert(Some(s.id.as_str()));
+        }
+        let mut edges: Vec<(String, String, i32)> = Vec::new();
+        for (gid, mid, k) in &g.macro_gen {
+            let (Some(gs), Some(mi)) = (g.sym.get(gid), g.macro_items.get(mid)) else { continue };
+            let Some(param) = mi.params.get(*k) else { continue };
+            let module = gs.path.rsplit_once("::").map_or("", |m| m.0);
+            for callee in mi.items.iter().filter(|(p, _)| p == param).flat_map(|(_, c)| c) {
+                let path = if callee.contains("::") { callee.clone() } else { format!("{module}::{callee}") };
+                if let Some(Some(t)) = by_path.get(path.as_str()).copied().map(|t| t.filter(|t| *t != gid.as_str())) {
+                    edges.push((gid.clone(), t.to_string(), gs.line));
+                }
+            }
+        }
+        for (c, t, l) in edges {
+            g.calls.entry((c, t)).or_insert((0, l)).0 += 1;
         }
     }
     // macro bodies run inside their callers: macro -> callee, and every caller of the macro -> callee

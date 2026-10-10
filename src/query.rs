@@ -39,7 +39,9 @@ Conventions
   required-features, #![cfg] at a file top) is not in it: check Cargo.toml.
   cc = approximate branch count. Bound variable-length paths; output stops at --max-rows rows.
 Blind spots: the graph has no edge for these, so check with GREP before answering \"none\" or \"all\"
-- `.method()` calls inside a macro_rules! body; derived impls (#[derive]) have no source or callers.
+- `.method()` calls inside a macro_rules! body; derived impls (#[derive]) have no source or callers. A fn a
+  macro_rules! generates from an ident argument (`fn $name`) gets the calls of its item in the macro body;
+  other macro-generated code has no edges.
 - calls through closures or fn pointers stored in fields / maps (only the place that names the fn has an edge).
 - routes / subjects built at run time, unless the project pins them in .cg/links ([[endpoint]]).
 - files no indexer covers (YAML, SQL, shell, Markdown) have File nodes only via link rules: GREP searches them.
@@ -251,6 +253,11 @@ pub fn hint_empty(c: &Connection, q: &str) -> Result<Vec<String>> {
     let mut hints = Vec::new();
     for m in LITERAL.captures_iter(q) {
         let lit = m.get(1).or(m.get(2)).map_or("", |x| x.as_str());
+        // a prefix / substring / regex operand is not meant to name anything
+        let before = q[..m.get(0).map_or(0, |x| x.start())].trim_end().to_uppercase();
+        if ["STARTS WITH", "ENDS WITH", "CONTAINS", "=~"].iter().any(|op| before.ends_with(op)) {
+            continue;
+        }
         if lit.len() < 3 || lit == "true" || lit == "false" {
             continue;
         }

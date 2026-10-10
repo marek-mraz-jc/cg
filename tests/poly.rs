@@ -183,3 +183,19 @@ fn lints_flag_answers_that_look_right_but_are_not() {
     let clean = q("MATCH (a:Symbol {path:'poly_server::store::MemStore::put'})-[:CALLS|DISPATCHES*1..2]->(b:Symbol) RETURN count(*)");
     assert!(!clean.contains("hint:"), "{clean}");
 }
+
+#[test]
+fn macro_generated_fns_call_what_their_item_calls() {
+    let out = cg(&["q", "--db", db(), "-e", "CALLEES poly_server::gen::count_orders", "-e", "CALLEES poly_server::gen::wipe_orders",
+                   "-e", "MATCH (h:Symbol {path:'poly_server::gen::wipe_orders'})-[:CALLS|DISPATCHES*1..3]->(x:Symbol) RETURN DISTINCT x.path ORDER BY x.path"]);
+    assert!(out.contains("poly_server::gen::count_orders | poly_server::gen::count | False"), "{out}");
+    assert!(!out.contains("poly_server::gen::count_orders | poly_server::gen::wipe"), "each fn gets only its own item's calls:\n{out}");
+    assert!(out.contains("poly_server::gen::wipe_orders | poly_server::gen::wipe | False"), "{out}");
+    assert!(out.contains("poly_server::store::MemStore::put"), "reachability continues through the generated fn:\n{out}");
+}
+
+#[test]
+fn prefix_literals_get_no_typo_hint() {
+    let out = q("MATCH (s:Symbol) WHERE s.path STARTS WITH 'poly_server::nope::' OR s.name CONTAINS 'zzqx' RETURN s.path");
+    assert!(!out.contains("matches no Symbol"), "{out}");
+}

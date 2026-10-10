@@ -1,11 +1,12 @@
-# axum routes: .route("/entities/{id}", get(read).delete(remove)) -> provides "GET /entities/{}" on handler `read`.
-# Set `prefix` to the path the router is nested under (.nest("/api", ...)).
+# NGSI-LD API routes: api_routes() in crates/antares-api/src/lib.rs lists them as
+# ("/entities/{id}", get(read).patch(merge)) tuples; router() nests the list under /ngsi-ld/v1.
+# -> provides "GET /ngsi-ld/v1/entities/{}" on handler `read`.
 [[link]]
-name = "axum-route"
+name = "api-routes"
 channel = "http"
 role = "provides"
-files = ["crates/antares-api/src/**/*.rs"]
-pattern = '(?s)\.route\(\s*"(?P<key>[^"]+)"\s*,(?P<body>.*?)\)\s*,?\s*\)'
+files = ["crates/antares-api/src/lib.rs"]
+pattern = '(?s)\(\s*"(?P<key>/[^"]+)"\s*,(?P<body>.*?)\)\s*,?\s*\)'
 each = '(?P<verb>get|post|put|patch|delete|head|options)\(\s*(?P<symbol>[\w:]+)'
 key = "{verb} {key}"
 prefix = "/ngsi-ld/v1"

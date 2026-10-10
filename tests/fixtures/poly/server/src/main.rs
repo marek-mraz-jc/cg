@@ -89,3 +89,5 @@ mod tests {
         assert_eq!(super::create_entity("x"), "201");
     }
 }
+
+mod gen;
